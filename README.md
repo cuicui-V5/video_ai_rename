@@ -40,6 +40,7 @@
 ### Python 环境准备
 推荐使用 Python 3.11+：
 ```bash
+pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
 pip install faster-whisper google-genai tqdm python-dotenv
 ```
 

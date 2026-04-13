@@ -134,6 +134,7 @@ log = logging.getLogger("VideoAIRename")
 _stats_lock = threading.Lock()
 _success = 0
 _fail    = 0
+_skipped = 0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -173,7 +174,22 @@ def probe_video(video_path: str) -> dict:
 
     has_audio    = any(s.get("codec_type") == "audio" for s in streams)
     duration     = float(fmt.get("duration", 0))
-    creation_time = fmt.get("tags", {}).get("creation_time", "")
+    
+    tags = fmt.get("tags", {})
+    creation_time = tags.get("creation_time", "")
+    
+    # 检测特有的防重复标记 (ExifTool -Software)
+    # 因为 ffprobe 对 MP4 文件默认不解析 Software 字段，我们必须用 exiftool 来读取它
+    software_tag = ""
+    try:
+        cmd_exif = [_tool("exiftool.exe"), "-Software", "-S", "-s", video_path]
+        r_exif = subprocess.run(cmd_exif, capture_output=True, text=True, encoding="utf-8", errors="ignore")
+        if r_exif.returncode == 0:
+            software_tag = r_exif.stdout.strip()
+    except Exception:
+        pass
+
+    is_processed = ("AIVideoRenameV1" in software_tag)
 
     mean_volume = None
     if has_audio:
@@ -184,6 +200,7 @@ def probe_video(video_path: str) -> dict:
         "mean_volume":  mean_volume,
         "duration":     duration,
         "creation_time": creation_time,
+        "is_processed":  is_processed,
     }
 
 
@@ -419,6 +436,10 @@ def write_metadata(video_path: str, title: str, description: str,
                  f"-ItemList:Comment={description}"]
     if creation_time:
         args.append(f"-CreateDate={creation_time}")
+        
+    # 打入特殊防重复扫描的标记水印
+    args += ["-Software=AIVideoRenameV1", "-ItemList:Software=AIVideoRenameV1"]
+    
     args.append(video_path)
 
     arg_file = video_path + ".exifargs"
@@ -618,8 +639,18 @@ def _run_pipeline(video_paths: list[str]):
             try:
                 stat = os.stat(vp)
                 job.orig_stat = (stat.st_ctime, stat.st_atime, stat.st_mtime)
-                log.info("\n[Probe] %s", Path(vp).name)
                 job.probe = probe_video(vp)
+                
+                # 如果发现特殊防重标记，直接跳过处理
+                if job.probe.get("is_processed"):
+                    log.info("[Probe] \u23ED\uFE0F 跳过已处理视频: %s", Path(vp).name)
+                    with _stats_lock:
+                        global _skipped
+                        _skipped += 1
+                    _mark_done()
+                    continue
+
+                log.info("\n[Probe] %s", Path(vp).name)
                 log.info("  时长=%.1fs  音量=%s dBFS  类型=%s",
                     job.probe["duration"],
                     f"{job.probe['mean_volume']:.1f}" if job.probe["mean_volume"] is not None else "N/A",
@@ -813,8 +844,8 @@ def collect_videos(folder: str) -> list[str]:
 
 
 def run_batch(folder: str):
-    global _success, _fail
-    _success = _fail = 0
+    global _success, _fail, _skipped
+    _success = _fail = _skipped = 0
 
     log.info("扫描文件夹: %s", folder)
     videos = collect_videos(folder)
@@ -828,8 +859,8 @@ def run_batch(folder: str):
     _run_pipeline(videos)
 
     log.info("\n" + "=" * 60)
-    log.info("全部处理完成: [OK] 成功 %d  [FAIL] 失败 %d  共计 %d",
-             _success, _fail, total)
+    log.info("全部处理完成: [OK] 成功 %d  [\u23ED\uFE0F 跳过] %d  [FAIL] 失败 %d  共计 %d",
+             _success, _skipped, _fail, total)
     log.info("=" * 60)
 
 
