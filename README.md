@@ -1,110 +1,62 @@
-# 视频 AI 自动重命名工具
+# AI Video Rename 结合大模型的视频全自动批量分类重命名流水线
 
-基于 **Faster-Whisper + Gemini 多模态** 的视频批量分类与重命名工具。
+**AI Video Rename** 是一款为重度视频创作者、剪辑师与视频库管理者设计的高性能自动化工具。
+它可以全自动地扫描特定文件夹内的大批量视频，利用本地化的语音转写引擎与多模态大模型，智能分析视频内部发生的故事，最后为每个视频生成具有明确时间点与描述性名称的标题，并自动灌入到视频原始元数据属性中。
 
-## 目录结构
+---
 
-```
-AiVideoRename/
-├── video_ai_rename.py      ← 主程序
-├── requirements.txt
-├── README.md
-└── ffmpeg/
-    ├── ffmpeg.exe
-    ├── ffprobe.exe
-    └── exiftool.exe
-```
+## 🚀 核心特性
 
-## 依赖安装
+- **多模态内容理解**: 工具不仅读取视频的纯粹视觉画面（截取多张具有代表性的关键帧），还可以对含有对话或音效的视频进行精准语音提取。
+- **并发流水线 (Pipeline) 架构**: 工具采用了极高效率的混合并发结构。使用一个队列执行只能串行的本地 GPU 级 Whisper 转写任务，同时另外的多个队列则并行地调用 FFmpeg 解析帧与请求外部的 Gemini AI API，使整体吞吐量在处理海量长视频时直接起飞！
+- **零拷贝极速元数据写入**: 传统的 FFmpeg Metadata 写入方式需要重新克隆并复制上几十 GB 的 MP4 数据。我们创新性地结合使用 `ExifTool`（配合就地重写和 ArgFile 防乱码机制），让长视频的元数据修改耗时降至 **毫秒级**，完美保护硬盘读写寿命并实现即时改名响应。
+- **精确的时间戳提取与还原**: 通过直接触达操作系统的底层的 `kernel32` 级 API 以及时区 (UTC+8) 自动校正，即使视频的名字变更，重命名后的全新视频会**在 Windows 系统层面上完全保留最原真的录像创建时间与修改时间**！
+- **开箱即防乱码配置**: 专门针对中文 Windows OS 环境设计。彻底处理了所有的 `subprocess` 繁杂的管道通信报错与 `ExifTool` 对中文路径、GBK 终端带来的恼人“烫烫烫”乱七八糟特殊字符。
 
+---
+
+## ⚙ 技术原理解析
+
+当您指向一个包含 100 个视频的文件夹并一键运行脚本时：
+1. **[初始化探测队]**
+   程序主线程会扫描文件并使用 `ffprobe` 迅猛提取视频的时长、音量，鉴别哪些文件是纯视觉的，哪些带有音频信息，并读取底层 MP4 时区的创始时间。
+2. **[GPU 单路狂暴转写]与[多路闪电截图] (解耦的并发特征流)**
+   被识别为带音频的视频会被推送至专门掌管 GPU 的 `Whisper 转写工人`（因为 GPU 只能被一家独占处理）。同时其余配置专门用以 CPU/硬盘并发工作的 `截图工人们` 则开始提取各个视频的画面关键帧，**它们互不干涉**。
+3. **[合并交接区]**
+   使用了一种双锁同步机制（`merge_map`）。无论图片还是音频谁先被处理好，它们都会在这个中心注册表打卡。一旦某个视频的“听力”和“视觉”材料全部凑齐……
+4. **[AI 判断与收尾流水]**
+   立即触发闲置的 AI 工人连接 Google Gemini 的云核心将视觉切片与文字结合，分析出高度精简描述和名字。最后直接丢给最后的收尾工人召唤 `Exiftool` 无损注入 metadata，并根据最严苛的安全重命名原则加上 `%Y%m%d_%H%M` 时间前缀后完美落幕！
+
+---
+
+## 🛠️ 安装说明与使用
+
+### 工具环境准备
+请将包含以下三个重要工具的 EXE 放置在专有的子目录 `ffmpeg/` 下（如果放到全局变量均能识别也可以）：
+- **`ffmpeg.exe`** (负责音频截取及极速画面抽取)
+- **`ffprobe.exe`** (负责识别文件内部底层音量或时长信息参数)
+- **`exiftool.exe`** (负责无损高并发且无视体积注入元空间信息)
+
+### Python 环境准备
+推荐使用 Python 3.11+：
 ```bash
-pip install -r requirements.txt
+pip install faster-whisper google-genai tqdm python-dotenv
 ```
 
-> **注意**: `faster-whisper` 首次运行会自动从 HuggingFace 下载模型（large-v3 约 3GB）。
-> 如网络受限，可提前手动下载或改用较小模型（`--whisper-model small`）。
-
-## 配置 API Key
-
-方式一（推荐）：设置环境变量
-```powershell
-$env:GEMINI_API_KEY = "你的API_Key"
+### 接入大模型秘钥配置
+本项目核心使用最新版 Google GenAI 云端进行多模态判断。你需要通过环境变量提供 `GEMINI_API_KEY`。
+最简单的做法是在同级目录下新建一个 `.env` 文件即可：
+```env
+GEMINI_API_KEY=你的真实的_apikey_填到这里
 ```
 
-方式二：直接修改脚本顶部 `CONFIG["gemini_api_key"]`
-
-方式三：命令行参数 `--api-key 你的Key`
-
-> 获取 Gemini API Key: https://aistudio.google.com/app/apikey
-
-## 使用方法
-
+### 运行方式
+直接传递要处理的文件夹作为参数：
 ```bash
-# 处理指定文件夹内所有视频
-python video_ai_rename.py D:\Videos\旅行视频
-
-# 干跑模式（只分析，不修改文件）
-python video_ai_rename.py D:\Videos --dry-run
-
-# 指定较小的 Whisper 模型（速度更快，精度稍低）
-python video_ai_rename.py D:\Videos --whisper-model small
-
-# 调整场景切换灵敏度（越小越灵敏，提取更多帧）
-python video_ai_rename.py D:\Videos --scene-threshold 0.3
-
-# 同时写入日志文件
-python video_ai_rename.py D:\Videos --log-file rename_log.txt
-
-# 查看所有参数
-python video_ai_rename.py --help
+python video_ai_rename.py "d:/视频/作品/待整理"
 ```
 
-## Pipeline 说明
-
+如果您想测试一下看程序给视频取的名字好不好听但暂时不想让他真正去改后缀以及重命名，可以先带上 `--dry-run` 免伤体验：
+```bash
+python video_ai_rename.py --dry-run "d:/视频/作品/待整理"
 ```
-Step 1: ffprobe 检测音频
-        ├── 有音频 → 双模态任务
-        └── 无音频/静音 → 纯视觉任务
-
-Step 2: 特征提取
-        ├── 2a: Faster-Whisper 语音转写（仅双模态）
-        └── 2b: FFmpeg 场景切换关键帧抽取（最多3张，720P）
-
-Step 3: Gemini 推理
-        └── 转写文本 + 关键帧 → 生成标题 + 描述
-
-Step 4: 写入 + 重命名
-        ├── FFmpeg 写入 MP4 元数据 (title/comment/creation_time)
-        └── 文件重命名
-```
-
-## 输出元数据
-
-| Tag | 内容 |
-|-----|------|
-| `title` | AI 生成的 12 字内简洁标题 |
-| `comment` | AI 生成的 100 字内视频描述 |
-| `creation_time` | 保留原始录制时间 |
-
-> 写入后，Windows 资源管理器「属性」中可查看 title/comment 字段。
-
-## 常用参数速查
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--api-key` | — | Gemini API Key |
-| `--model` | `gemini-3-flash-preview` | Gemini 模型名称 |
-| `--whisper-model` | `large-v3-turbo` | Whisper 模型大小 |
-| `--dry-run` | False | 干跑，不修改文件 |
-| `--scene-threshold` | `0.4` | 场景切换阈值 |
-| `--max-keyframes` | `3` | 最大关键帧数 |
-| `--silence-db` | `-60.0` | 静音判断阈值(dBFS) |
-| `--no-move-failed` | — | 失败不移入 _failed/ |
-| `--log-file` | — | 日志输出文件 |
-
-## 注意事项
-
-- 处理失败的视频会自动移入目标文件夹的 `_failed/` 子目录，不影响其余视频处理。
-- 脚本会递归扫描子目录，自动跳过 `_failed/` 目录。
-- 支持格式：`.mp4 .mov .avi .mkv .m4v .wmv .flv .webm .ts .mts .m2ts`
-- GPU 加速：若 CUDA 可用，Faster-Whisper 自动使用 GPU（float16），否则回退 CPU（int8）。
