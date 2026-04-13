@@ -76,44 +76,51 @@ if os.name == 'nt':
 #  可在此处修改的全局配置
 # ─────────────────────────────────────────────
 CONFIG = {
-    # Gemini API Key (推荐通过 .env 文件或环境变量 GEMINI_API_KEY 传入)
-    "gemini_api_key": os.environ.get("GEMINI_API_KEY", ""),
+    # ── 公共配置 ───────────────────────────────────────────────────────────────────
+    # AI 供应商选择: "gemini" 或 "openai" (优先读取 .env)
+    "ai_provider": os.environ.get("AI_PROVIDER", "openai"),
 
+    # ── Gemini 配置 ───────────────────────────────────────────────────────────────
+    # API Key (推荐通过 .env 文件或环境变量 GEMINI_API_KEY 传入)
+    "gemini_api_key": os.environ.get("GEMINI_API_KEY", ""),
     # Gemini 模型名称
     "gemini_model": "gemini-3-flash-preview",
 
+    # ── OpenAI 层 (支持任意第三方 OpenAI 居容接口) ───────────────────────────
+    # API Key (推荐通过 .env 文件或环境变量 OPENAI_API_KEY 传入)
+    "openai_api_key": os.environ.get("OPENAI_API_KEY", ""),
+    # OpenAI 兼容的请求地址 (例: https://api.openai.com/v1  或第三方接口)
+    "openai_base_url": os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+    # 请求的模型名 (如 gpt-4o / qwen-vl-max / glm-4v 等)
+    "openai_model": os.environ.get("OPENAI_MODEL", "gpt-4o"),
+
+    # ── 转写配置 ───────────────────────────────────────────────────────────────────
     # Faster-Whisper 模型大小
     "whisper_model": "large-v3-turbo",
-
     # Faster-Whisper 计算精度
     "whisper_compute_type": "int8_float16",
 
-    # 关键帧最多提取数量
+    # ── 关键帧配置 ──────────────────────────────────────────────────────────────────
+    # 最多提取关键帧数量
     "max_keyframes": 3,
-
     # 关键帧缩放宽度 (px)
     "keyframe_width": 720,
 
+    # ── 其他配置 ──────────────────────────────────────────────────────────────────
     # 静音判断阈值 (dBFS), 低于此值认为静音
     "silence_threshold_db": -60.0,
-
     # 视频文件扩展名白名单
     "video_extensions": {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".wmv",
                          ".flv", ".webm", ".ts", ".mts", ".m2ts"},
-
     # ffmpeg / ffprobe / exiftool 所在目录 (相对于本脚本)
     "tools_dir": "ffmpeg",
-
-    # 并发截图线程数 (CPU密集型, 推荐 2~4)
+    # 并发截图线程数
     "keyframe_workers": 2,
-
-    # 并发 AI/完成线程数 (IO密集型, 推荐 2~4)
+    # AI/收尾并发线程数
     "ai_workers": 2,
-
     # 是否将处理失败的文件移入 _failed 子目录
     "move_failed": True,
-
-    # 干跑模式 (只打印不执行写入/重命名)
+    # 干跑模式
     "dry_run": False,
 }
 
@@ -336,7 +343,7 @@ def _extract_uniform_frames(video_path: str, tmp_dir: str,
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Step 3: Gemini 多模态推理
+#  Step 3: AI 多模态推理 (Gemini / OpenAI 兼容双后端)
 # ══════════════════════════════════════════════════════════════════════════════
 SYSTEM_PROMPT = """你现在是一个专业的视频内容分析专家。
 我会为你提供：
@@ -348,7 +355,28 @@ SYSTEM_PROMPT = """你现在是一个专业的视频内容分析专家。
 2. 撰写一段详细生动的【内容描述】，概括视频中的场景、核心主体、人物动作以及故事脉络。"""
 
 
-def query_gemini(transcript: str, frame_paths: list[str], creation_time: str) -> dict:
+# Pydantic 结构化输出模型（两个后端共用）
+from pydantic import BaseModel, Field
+
+class VideoMetadata(BaseModel):
+    title: str = Field(description="12字以内的简洁标题。请只返回概括性文字，【绝对不要】包含任何形式的日期时间或数字前缀，不要标点符号！")
+    description: str = Field(description="100字以内的详细中文描述，概括视频主要内容")
+
+
+def _build_text_prompt(transcript: str, creation_time: str) -> str:
+    text = ""
+    if transcript:
+        text += f"【音频转写文本】\n{transcript}\n\n"
+    else:
+        text += "【音频转写文本】\n（无音频或无法识别的语音内容）\n\n"
+    if creation_time:
+        text += f"【原始录制时间参考】\n{creation_time}\n\n"
+    text += "【请结合以上文本并参考附带的关键帧图片进行判定】"
+    return text
+
+
+def _query_gemini_backend(transcript: str, frame_paths: list[str], creation_time: str) -> dict:
+    """Gemini 多模态后端，使用 Pydantic response_schema 强制结构化输出。"""
     try:
         from google import genai
         from google.genai import types
@@ -360,64 +388,118 @@ def query_gemini(transcript: str, frame_paths: list[str], creation_time: str) ->
         raise ValueError("未设置 GEMINI_API_KEY")
 
     client = genai.Client(api_key=api_key)
-
-    text_prompt = ""
-    if transcript:
-        text_prompt += f"【音频转写文本】\n{transcript}\n\n"
-    else:
-        text_prompt += "【音频转写文本】\n（无音频或无法识别的语音内容）\n\n"
-    if creation_time:
-        text_prompt += f"【原始录制时间参考】\n{creation_time}\n\n"
-    text_prompt += "【请结合以上文本并参考附带的关键帧图片进行判定】"
-
-    contents = [text_prompt]
+    contents = [_build_text_prompt(transcript, creation_time)]
     for fp in frame_paths:
         with open(fp, "rb") as f:
             img_bytes = f.read()
         contents.append(types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"))
 
-    from pydantic import BaseModel, Field
-    class VideoMetadata(BaseModel):
-        title: str = Field(description="12字以内的简洁标题。请只返回概括性文字，【绝对不要】包含任何形式的日期时间或数字前缀，不要标点符号！")
-        description: str = Field(description="100字以内的详细中文描述，概括视频主要内容")
+    response = client.models.generate_content(
+        model=CONFIG["gemini_model"],
+        contents=contents,
+        config=types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            temperature=0.3,
+            response_mime_type="application/json",
+            response_schema=VideoMetadata,
+        )
+    )
+    finish = (response.candidates[0].finish_reason.name
+              if response.candidates and response.candidates[0].finish_reason
+              else "UNKNOWN")
+    raw = response.text.strip() if response.text else "{}"
+    log.info("  [Gemini] 结束原因: %s | 原始响应: %s", finish, raw[:200])
+    try:
+        return json.loads(raw)
+    except Exception:
+        raise ValueError(f"JSON 解析失败: {raw[:300]}")
 
+
+def _query_openai_backend(transcript: str, frame_paths: list[str], creation_time: str) -> dict:
+    """
+    OpenAI 兼容层后端，支持任意第三方接口（含 Gemini OpenAI 兼容层）。
+    使用 json_object 模式 + system prompt 约束，兼容性最广。
+    """
+    try:
+        from openai import OpenAI
+    except ImportError:
+        raise ImportError("请安装: pip install openai")
+    import base64
+
+    api_key = CONFIG["openai_api_key"] or os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        raise ValueError("未设置 OPENAI_API_KEY")
+
+    client = OpenAI(api_key=api_key, base_url=CONFIG["openai_base_url"])
+
+    # 将 JSON 结构约束嵌入 system prompt，避免使用 json_schema（Gemini 兼容层不支持）
+    system_with_schema = SYSTEM_PROMPT + """
+
+请严格以如下 JSON 格式输出，不要输出任何其他内容：
+{
+  "title": "12字以内的简洁中文标题，不含日期时间数字前缀，不含标点",
+  "description": "100字以内的详细中文描述，概括视频主要内容"
+}"""
+
+    user_content: list = [{"type": "text", "text": _build_text_prompt(transcript, creation_time)}]
+    for fp in frame_paths:
+        with open(fp, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("utf-8")
+        user_content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "low"},
+        })
+
+    response = client.chat.completions.create(
+        model=CONFIG["openai_model"],
+        messages=[
+            {"role": "system", "content": system_with_schema},
+            {"role": "user",   "content": user_content},
+        ],
+        temperature=0.3,
+        response_format={"type": "json_object"},   # 兼容所有 OpenAI 兼容层
+    )
+    choice = response.choices[0]
+    finish = choice.finish_reason or "UNKNOWN"
+    raw = (choice.message.content or "{}").strip()
+    log.info("  [OpenAI] 结束原因: %s | 原始响应: %s", finish, raw[:200])
+    try:
+        data = json.loads(raw)
+        # 健壮性校验：确保必须字段存在
+        if "title" not in data or "description" not in data:
+            raise ValueError(f"返回 JSON 缺少必要字段: {list(data.keys())}")
+        return data
+    except json.JSONDecodeError:
+        raise ValueError(f"JSON 解析失败: {raw[:300]}")
+
+
+
+def query_ai(transcript: str, frame_paths: list[str], creation_time: str) -> dict:
+    """
+    公共 AI 调度函数，统一管理重试/退避逻辑。
+    根据 CONFIG['ai_provider'] 自动路由到 Gemini 或 OpenAI 兼容后端。
+    """
     import time
-    max_retries = 3
-    base_delay = 5
+    provider = CONFIG.get("ai_provider", "gemini").lower()
+    backend  = _query_gemini_backend if provider == "gemini" else _query_openai_backend
+    label    = "Gemini" if provider == "gemini" else f"OpenAI({CONFIG['openai_model']})"
 
+    max_retries = 3
+    base_delay  = 5
     for attempt in range(max_retries + 1):
         try:
-            response = client.models.generate_content(
-                model=CONFIG["gemini_model"],
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=SYSTEM_PROMPT,
-                    temperature=0.3,
-                    response_mime_type="application/json",
-                    response_schema=VideoMetadata,
-                )
-            )
-
-            finish = (response.candidates[0].finish_reason.name
-                      if response.candidates and response.candidates[0].finish_reason
-                      else "UNKNOWN")
-            raw = response.text.strip() if response.text else "{}"
-            log.info("  [Gemini] 结束原因: %s | 原始响应: %s", finish, raw[:200])
-
-            try:
-                return json.loads(raw)
-            except Exception:
-                raise ValueError(f"JSON 解析失败: {raw[:300]}")
-
+            return backend(transcript, frame_paths, creation_time)
         except Exception as e:
             if attempt < max_retries:
                 sleep_time = base_delay * (2 ** attempt)
-                log.warning("  [\u26A0\uFE0FGemini] API请求失败 (可能为503繁忙), 准备第 %d 次重试 (等待 %d 秒)... 错误: %s", 
-                            attempt + 1, sleep_time, str(e).split('\n')[0])
+                log.warning(
+                    "  [⚠ %s] 请求失败，第 %d 次重试 (等待 %ds)... 错误: %s",
+                    label, attempt + 1, sleep_time, str(e).split('\n')[0]
+                )
                 time.sleep(sleep_time)
             else:
-                # 重试全部耗尽，向外层抛出致命异常
                 raise e
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -714,24 +796,25 @@ def _run_pipeline(video_paths: list[str]):
             if ready:
                 ai_q.put((job, tr, fr))
 
-    # ── Worker: Gemini AI (并发 IO) ───────────────────────────────────────────
+    # ── Worker: AI 调度 (并发 IO, 自动路由到所选供应商) ─────────────────────────
     def _ai_worker():
+        _provider_label = CONFIG.get("ai_provider", "gemini").upper()
         while True:
             task = ai_q.get()
             if task is _SENTINEL:
                 break
             job, transcript, frame_paths = task
             vp = job.video_path
-            log.info("[Gemini] 调用 AI: %s", Path(vp).name)
+            log.info("[%s] 调用 AI: %s", _provider_label, Path(vp).name)
             try:
-                result = query_gemini(transcript, frame_paths,
-                                      job.probe["creation_time"])
+                result = query_ai(transcript, frame_paths,
+                                  job.probe["creation_time"])
                 job.ai_result = result
                 log.info("  AI 标题: %s", result.get("title", ""))
                 log.info("  AI 描述: %s", result.get("description", "")[:80])
                 finalize_q.put(job)
             except Exception as e:
-                log.error("[FAIL] [Gemini] %s 失败: %s", Path(vp).name, e)
+                log.error("[FAIL] [%s] %s 失败: %s", _provider_label, Path(vp).name, e)
                 _cleanup_job(job, failed=True)
                 _mark_done()
 
