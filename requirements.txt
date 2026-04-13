@@ -1,0 +1,11 @@
+# 视频 AI 重命名工具依赖
+# 安装命令: pip install -r requirements.txt
+
+# Gemini 多模态 AI SDK (新版)
+google-genai>=0.5.0
+
+# 本地语音转写
+faster-whisper>=1.0.0
+
+# 进度条（可选但推荐）
+tqdm>=4.66.0
