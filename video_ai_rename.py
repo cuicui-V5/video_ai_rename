@@ -185,14 +185,35 @@ def probe_video(video_path: str) -> dict:
     tags = fmt.get("tags", {})
     creation_time = tags.get("creation_time", "")
     
-    # 检测特有的防重复标记 (ExifTool -Software)
-    # 因为 ffprobe 对 MP4 文件默认不解析 Software 字段，我们必须用 exiftool 来读取它
+    # 尝试从所有流（视频/音频）再次提取
+    if not creation_time or "0000" in creation_time:
+        for s in streams:
+            st = s.get("tags", {})
+            if "creation_time" in st and "0000" not in st["creation_time"]:
+                creation_time = st["creation_time"]
+                break
+    
+    # 检测特有的防重复标记 (ExifTool -Software)，并且提取所有可能保留原始开拍时间的元数据
+    # 因为 ffprobe 对各种摄像机厂商自定义的时间元数据解析不足，使用 exiftool 进行兜底
     software_tag = ""
     try:
-        cmd_exif = [_tool("exiftool.exe"), "-Software", "-S", "-s", video_path]
+        cmd_exif = [_tool("exiftool.exe"), "-Software", "-CreateDate", "-MediaCreateDate", "-DateTimeOriginal", "-j", video_path]
         r_exif = subprocess.run(cmd_exif, capture_output=True, text=True, encoding="utf-8", errors="ignore")
         if r_exif.returncode == 0:
-            software_tag = r_exif.stdout.strip()
+            exif_docs = json.loads(r_exif.stdout)
+            if exif_docs:
+                exif_data = exif_docs[0]
+                software_tag = str(exif_data.get("Software", ""))
+                
+                # 如果 ffprobe 找不到或者时间无效，优先用 exiftool 提取的元数据时间
+                if not creation_time or "0000" in creation_time:
+                    for key in ["DateTimeOriginal", "CreateDate", "MediaCreateDate"]:
+                        if key in exif_data:
+                            val = str(exif_data[key])
+                            if val and "0000" not in val:
+                                # exiftool 的时间格式通常是 `2024:05:01 12:30:00`，将其修正为 ISO 格式
+                                creation_time = val.replace(":", "-", 2).replace(" ", "T", 1)
+                                break
     except Exception:
         pass
 
@@ -614,15 +635,33 @@ def set_file_times_windows(file_path: str, ctime: float,
 
 
 def extract_date_str(video_path: str, creation_time_str: str) -> str:
-    if creation_time_str:
+    # 策略 1: 使用由 ffprobe 和 exiftool 深度挖掘到的元数据时间
+    if creation_time_str and "0000" not in creation_time_str:
         try:
             ct = creation_time_str.replace('Z', '+00:00')
-            dt = datetime.datetime.fromisoformat(ct).astimezone()
+            if "T" not in ct and " " in ct:
+                ct = ct.replace(" ", "T")
+            dt = datetime.datetime.fromisoformat(ct)
+            if dt.tzinfo is not None:
+                dt = dt.astimezone()
             return dt.strftime("%Y%m%d_%H%M")
         except Exception:
             pass
-    mtime = os.path.getmtime(video_path)
-    return datetime.datetime.fromtimestamp(mtime).strftime("%Y%m%d_%H%M")
+            
+    # 策略 2: 降级到文件系统的底层属性信息（取最近的一个比较真实的时间：创建时间 or 修改时间）
+    try:
+        st = os.stat(video_path)
+        # Windows中，文件如果被剪切、被下载、压缩包解压等，由于不同途径会导致 ctime 或 mtime 其中之一变更为"现在"，
+        # 但通常另一个会保留最真实的历史时间，因此我们直接取这俩之中比较老的那个即可（min）。
+        oldest_ts = min(st.st_mtime, st.st_ctime)
+        # 防止获取到极其离谱的 1970 纪元，稍微加个常识下限校验
+        if oldest_ts > 100000000:
+            return datetime.datetime.fromtimestamp(oldest_ts).strftime("%Y%m%d_%H%M")
+    except Exception:
+        pass
+        
+    # 策略 3: 系统及文件双层剥离全部失败，终极兜底当前时间
+    return datetime.datetime.now().strftime("%Y%m%d_%H%M")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

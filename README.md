@@ -72,3 +72,4 @@ python video_ai_rename.py "d:/视频/作品/待整理"
 ```bash
 python video_ai_rename.py --dry-run "d:/视频/作品/待整理"
 ```
+git subtree push --prefix=AiVideoRename sub_origin main
