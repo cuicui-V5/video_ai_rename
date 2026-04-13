@@ -12,6 +12,8 @@
 - **零拷贝极速元数据写入**: 传统的 FFmpeg Metadata 写入方式需要重新克隆并复制上几十 GB 的 MP4 数据。我们创新性地结合使用 `ExifTool`（配合就地重写和 ArgFile 防乱码机制），让长视频的元数据修改耗时降至 **毫秒级**，完美保护硬盘读写寿命并实现即时改名响应。
 - **精确的时间戳提取与还原**: 通过直接触达操作系统的底层的 `kernel32` 级 API 以及时区 (UTC+8) 自动校正，即使视频的名字变更，重命名后的全新视频会**在 Windows 系统层面上完全保留最原真的录像创建时间与修改时间**！
 - **开箱即防乱码配置**: 专门针对中文 Windows OS 环境设计。彻底处理了所有的 `subprocess` 繁杂的管道通信报错与 `ExifTool` 对中文路径、GBK 终端带来的恼人“烫烫烫”乱七八糟特殊字符。
+- **多模型后端支持**: 原生支持 Gemini 官方库，同时新增了 OpenAI 兼容接口层。你可以自由切到 GPT-4o、Qwen-VL-Max、GLM-4V 或者任意支持视觉能力的第三方中转 API 服务。
+- **防止重复处理机制 (软水印)**: 程序会通过 ExifTool 给成功处理过的视频自动打上不可见的 `AIVideoRenameV1` 软件标记，二次执行扫描时遇到它们将以毫秒级速度跳过，杜绝重复消耗 Token 和时间。
 
 ---
 
@@ -44,10 +46,20 @@ pip install faster-whisper google-genai tqdm python-dotenv openai nvidia-cublas-
 ```
 
 ### 接入大模型秘钥配置
-本项目核心使用最新版 Google GenAI 云端进行多模态判断。你需要通过环境变量提供 `GEMINI_API_KEY`。
-最简单的做法是在同级目录下新建一个 `.env` 文件即可：
+本项目支持双重 AI 后端（Gemini 或 OpenAI 兼容接口），底层实现了智能重试机制。你可以通过在程序同级目录下新建一个 `.env` 文件来灵活配置（按需二选一即可）：
+
+**选项 A：使用 Google Gemini 后端（系统默认推荐）**
 ```env
+AI_PROVIDER=gemini
 GEMINI_API_KEY=你的真实的_apikey_填到这里
+```
+
+**选项 B：使用 OpenAI 或其他兼容第三方接口 (如 GPT-4o, 千问, 智谱等)**
+```env
+AI_PROVIDER=openai
+OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxx
+OPENAI_BASE_URL=https://api.openai.com/v1     # 如果你使用国内大模型或第三方中继站，替换成他们相应的 URL
+OPENAI_MODEL=gpt-4o                         # 对应的多模态模型名称
 ```
 
 ### 运行方式

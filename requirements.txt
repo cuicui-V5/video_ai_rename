@@ -9,3 +9,13 @@ faster-whisper>=1.0.0
 
 # 进度条（可选但推荐）
 tqdm>=4.66.0
+
+# 环境变量管理
+python-dotenv>=1.0.0
+
+# OpenAI API SDK (用于兼容其他模型后端)
+openai>=1.14.0
+
+# GPU 加速依赖 (仅适用于 CUDA 12 环境)
+nvidia-cublas-cu12
+nvidia-cudnn-cu12

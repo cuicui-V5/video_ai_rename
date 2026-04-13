@@ -78,7 +78,7 @@ if os.name == 'nt':
 CONFIG = {
     # ── 公共配置 ───────────────────────────────────────────────────────────────────
     # AI 供应商选择: "gemini" 或 "openai" (优先读取 .env)
-    "ai_provider": os.environ.get("AI_PROVIDER", "openai"),
+    "ai_provider": os.environ.get("AI_PROVIDER", "gemini"),
 
     # ── Gemini 配置 ───────────────────────────────────────────────────────────────
     # API Key (推荐通过 .env 文件或环境变量 GEMINI_API_KEY 传入)
